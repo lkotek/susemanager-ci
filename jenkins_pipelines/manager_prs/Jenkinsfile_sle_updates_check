@@ -1,0 +1,120 @@
+#!/usr/bin/env groovy
+
+// Configure the build properties
+properties([
+    buildDiscarder(logRotator(numToKeepStr: '20', daysToKeepStr: '4')),
+    disableConcurrentBuilds(),
+])
+
+pipeline {
+
+    parameters {
+        string(defaultValue: 'Manager-3.2', description: 'Testsuite GitHub branch: It should match the value at manager-3.2-2obs', name: 'testsuite_branch')
+        string(defaultValue: '32-sle-unreleased-updates/VARS-full.sh', description: 'Sumaform Test Runner environment to use', name: 'sumaform_env')
+        string(defaultValue: 'galaxy-ci@suse.de', description: 'Email address to be used as recipient for the report', name: 'mailto')
+        string(defaultValue: 'http://download.suse.de/ibs/SUSE:/Maintenance:/11064/SUSE_Updates_SLE-SERVER_12-SP4_x86_64/', description: 'Incident channel URL', name: 'incident_channel')
+    }
+
+    environment {
+        repository = 'SUSE/spacewalk'
+        add_repository_cmd = """pushd spacewalk/testsuite/features/support/;
+                              ruby -r "./sle-update-utils.rb" -e "add_repository '${params.incident_channel}'";
+                              popd""".stripIndent()
+        check_and_update_cmd = """pushd spacewalk/testsuite/features/support/;
+                                ruby -r "./sle-update-utils.rb" -e "check_and_update";
+                                popd""".stripIndent()   
+        skipTestSuiteStages = false           
+    }
+
+    agent { label 'sumaform-cucumber' }
+
+    triggers {
+        cron('H(0-30) 0-23/4 * * *')
+    }
+
+    stages {
+        stage('Checkout repositories') {
+            steps {
+                echo 'Check out repositories'
+                checkout scm
+                git branch: 'sle-update-changes', url: 'https://gitlab.suse.de/galaxy/sumaform-test-runner.git'
+            }
+        }
+
+        //TODO: Catch errors on terraform and fail that stage
+        stage('Deploy') {
+            steps {
+                script {
+                    DEPLOY_LOG = sh(
+                        script: "bash jenkins-deploy.sh ${params.sumaform_env} ${params.mailto} ${params.testsuite_branch}",
+                        returnStdout: true
+                        ).trim()
+                    if (!DEPLOY_LOG.contains('Apply complete!')) {
+                        error('Aborting the build, as the environment is not deployed properly')
+                    }
+                }
+            }
+        }
+
+        stage('Check and update patches') {
+            steps {
+                script {
+                    echo 'Adding the incident channel with the packages provided by SLE Maintenance'
+                    sh "source ${params.sumaform_env} && ssh $CNODE ${add_repository_cmd}"
+
+                    echo '''Connect to SUMA server and run zypper ref and zypper patch,
+                            if there is no changes we skip the rest of stages, going directly to [Set Status] stage'''
+                    CHECK_AND_UPDATE_LOG = sh(
+                        script: "ssh $CNODE ${check_and_update_cmd}",
+                        returnStdout: true
+                        ).trim()
+                    if (!CHECK_AND_UPDATE_LOG.contains('packages are going to be upgraded')) {
+                        echo 'There are no SLE Updates that could impact on SUMA'
+                        skipTestSuiteStages = true
+                    }
+                }
+            }
+        }
+
+        stage('Configure SUSE Manager') {
+            when {
+                expression {
+                    !skipTestSuiteStages
+                }
+            }
+            steps {
+                echo 'Configure SUSE Manager'
+                echo 'We must connect to the server and run the same script used in sumaform to configure the server'
+            }
+        }
+
+        stage('Test') {
+            when {
+                expression {
+                    !skipTestSuiteStages
+                }
+            }
+            steps{
+                echo 'Test scenarios which could be affected by a SLE Update'
+                sh "TESTSUITE_SET=sle-updates bash jenkins-test-runner.sh ${params.sumaform_env}"
+            }
+        }
+
+        stage('Set Status') {
+            steps {
+                echo 'It will request to an API not yet decided, to set the status of the release request in approved, declined or skipped'
+            }
+        }
+    }
+
+    post {
+        success{
+            script {
+                if (params.cleanWorkspace == true) {
+                    echo 'Clean up current workspace, when job success.'
+                    cleanWs()
+                }
+            }
+        }
+    }
+}
