@@ -31,7 +31,7 @@ pipeline {
         stage('Deploy') {
             steps {
                 checkout scm
-                git branch: 'master', url: 'https://gitlab.suse.de/lkotek/sumaform-test-runner.git'
+                git branch: 'test-qam', url: 'https://gitlab.suse.de/lkotek/sumaform-test-runner.git'
                 sh "bash jenkins-deploy.sh ${params.sumaform_env} ${params.mailto} ${params.testsuite_branch}"
                 script { deployed = true }
             }
