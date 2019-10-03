@@ -55,7 +55,7 @@ pipeline {
 
         stage('Core - Initialize clients') {
             steps {
-                sh "TESTSUITE_SET=init_clients RAKE_TASK=parallel bash jenkins-test-runner.sh ${params.sumaform_env}"
+                sh "TESTSUITE_SET=init_clients bash jenkins-test-runner.sh ${params.sumaform_env}"
             }
         }
         
